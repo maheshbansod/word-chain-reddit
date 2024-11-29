@@ -61,7 +61,9 @@ Devvit.addCustomPostType({
         const parsed = JSON.parse(redisPostState) as PostState;
         if (parsed.type === PostStateType.Playing) {
           const redisWordsSoFar = await context.redis.get(`wordsSoFar_${context.postId}`);
+          const redisCurrentTurn = await context.redis.get(`currentTurn_${context.postId}`);
           parsed.initWordsSoFar = JSON.parse(redisWordsSoFar ?? "[]") as string[];
+          parsed.currentTurn = redisCurrentTurn ?? 'a_cube_root_of_one';
         }
         return parsed;
       } catch (e) {
@@ -140,6 +142,8 @@ function Game({ context, initialPlayers, playersGetter, username, initialPostSta
     setPostState({ type: PostStateType.Playing, letter: randomLetter, currentTurn: randomTurn, initWordsSoFar: [] });
     channel.send({ type: 'startGame', data: { letter: randomLetter, currentTurn: randomTurn } });
     await context.redis.set(`postState_${context.postId}`, JSON.stringify({ type: PostStateType.Playing, letter: randomLetter, currentTurn: randomTurn }));
+    await context.redis.set(`currentTurn_${context.postId}`, randomTurn);
+    await context.redis.set(`wordsSoFar_${context.postId}`, JSON.stringify([]));
   };
 
   const onJoinGameClick = async () => {
@@ -174,11 +178,16 @@ function Game({ context, initialPlayers, playersGetter, username, initialPostSta
     </>
   };
 
-  // Render the custom post type
-  return <vstack>
-    {postState.type === PostStateType.Playing && <GamePlay context={context} gamePlayData={postState} username={username} players={players} />}
-    <text>hello {postState.type}</text>
-    </vstack>
+  if (postState.type === PostStateType.Playing) {
+    const moveTurn = () => {
+      const nextTurn = players[(players.indexOf(postState.currentTurn) + 1) % players.length];  
+      setPostState({ ...postState, currentTurn: nextTurn });
+    }
+    return <GamePlay context={context} gamePlayData={postState} username={username} players={players} moveTurn={moveTurn} />
+  }
+
+  return <text>hello {postState.type}</text>
+
 }
 
 
@@ -193,6 +202,7 @@ type GamePlayParams = {
   };
   players: string[];
   username: string;
+  moveTurn: () => void;
 }
 
 type GamePlayMessage = {
@@ -200,7 +210,7 @@ type GamePlayMessage = {
   data: { word: string };
 }
 
-function GamePlay({ context, gamePlayData, username, players }: GamePlayParams) {
+function GamePlay({ context, gamePlayData, username, players, moveTurn }: GamePlayParams) {
   const { letter, currentTurn, initWordsSoFar } = gamePlayData;
   const nextTurn = players[(players.indexOf(currentTurn) + 1) % players.length];
 
@@ -212,8 +222,10 @@ function GamePlay({ context, gamePlayData, username, players }: GamePlayParams) 
     name: 'word_chain_gameplay',
     onMessage: (msg) => {
       if (msg.type === 'addWord') {
-        setWordsSoFar([...wordsSoFar, msg.data.word]);
-        context.redis.set(`wordsSoFar_${context.postId}`, JSON.stringify([...wordsSoFar, msg.data.word]));
+        if (currentTurn !== username) {
+          setWordsSoFar([...wordsSoFar, msg.data.word]);
+        }
+        moveTurn();
       } else {
         throw new Error(`Unknown message type: ${msg}`);
       }
@@ -238,6 +250,7 @@ function GamePlay({ context, gamePlayData, username, players }: GamePlayParams) 
     }
     channel.send({ type: 'addWord', data: { word } });
     context.redis.set(`wordsSoFar_${context.postId}`, JSON.stringify([...wordsSoFar, word]));
+    context.redis.set(`currentTurn_${context.postId}`, nextTurn);
     setWordsSoFar([...wordsSoFar, word]);
   });
 
