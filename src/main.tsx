@@ -31,7 +31,7 @@ type PostState = {
   type: PostStateType.Playing;
   letter: string;
   currentTurn: string;
-  initWordsSoFar: string[];
+  initWordsSoFar: WordSoFar[];
 } | {
   type: PostStateType.Ended;
 }
@@ -62,7 +62,7 @@ Devvit.addCustomPostType({
         if (parsed.type === PostStateType.Playing) {
           const redisWordsSoFar = await context.redis.get(`wordsSoFar_${context.postId}`);
           const redisCurrentTurn = await context.redis.get(`currentTurn_${context.postId}`);
-          parsed.initWordsSoFar = JSON.parse(redisWordsSoFar ?? "[]") as string[];
+          parsed.initWordsSoFar = JSON.parse(redisWordsSoFar ?? "[]") as WordSoFar[];
           parsed.currentTurn = redisCurrentTurn ?? 'a_cube_root_of_one';
         }
         return parsed;
@@ -182,8 +182,19 @@ function Game({ context, initialPlayers, playersGetter, username, initialPostSta
     const moveTurn = () => {
       const nextTurn = players[(players.indexOf(postState.currentTurn) + 1) % players.length];  
       setPostState({ ...postState, currentTurn: nextTurn });
-    }
-    return <GamePlay context={context} gamePlayData={postState} username={username} players={players} moveTurn={moveTurn} />
+    };
+    const leaveGame = async () => {
+      setPostState({ type: PostStateType.Lobby });
+      await context.redis.set(`postState_${context.postId}`, JSON.stringify({ type: PostStateType.Lobby }));
+    };
+    const clearWordsSoFar = async () => {
+      await context.redis.set(`wordsSoFar_${context.postId}`, JSON.stringify([]));
+      setPostState({ ...postState, initWordsSoFar: [] });
+    };
+    return <vstack>
+      <GamePlay context={context} gamePlayData={postState} username={username} players={players} moveTurn={moveTurn} leaveGame={leaveGame} />
+      <button onPress={clearWordsSoFar}>Clear words so far</button>
+    </vstack>
   }
 
   return <text>hello {postState.type}</text>
@@ -198,11 +209,12 @@ type GamePlayParams = {
   gamePlayData: {
     letter: string;
     currentTurn: string;
-    initWordsSoFar: string[];
+    initWordsSoFar: WordSoFar[];
   };
   players: string[];
   username: string;
   moveTurn: () => void;
+  leaveGame: () => void;
 }
 
 type GamePlayMessage = {
@@ -210,11 +222,16 @@ type GamePlayMessage = {
   data: { word: string };
 }
 
-function GamePlay({ context, gamePlayData, username, players, moveTurn }: GamePlayParams) {
+type WordSoFar = {
+  by: string;
+  word: string;
+}
+
+function GamePlay({ context, gamePlayData, username, players, moveTurn, leaveGame }: GamePlayParams) {
   const { letter, currentTurn, initWordsSoFar } = gamePlayData;
   const nextTurn = players[(players.indexOf(currentTurn) + 1) % players.length];
 
-  const [wordsSoFar, setWordsSoFar] = useState<string[]>(initWordsSoFar);
+  const [wordsSoFar, setWordsSoFar] = useState<WordSoFar[]>(initWordsSoFar);
 
   const isCurrentTurn = currentTurn === username;
 
@@ -223,7 +240,7 @@ function GamePlay({ context, gamePlayData, username, players, moveTurn }: GamePl
     onMessage: (msg) => {
       if (msg.type === 'addWord') {
         if (currentTurn !== username) {
-          setWordsSoFar([...wordsSoFar, msg.data.word]);
+          setWordsSoFar([...wordsSoFar, {by: currentTurn, word: msg.data.word}]);
         }
         moveTurn();
       } else {
@@ -249,9 +266,9 @@ function GamePlay({ context, gamePlayData, username, players, moveTurn }: GamePl
       return;
     }
     channel.send({ type: 'addWord', data: { word } });
-    context.redis.set(`wordsSoFar_${context.postId}`, JSON.stringify([...wordsSoFar, word]));
+    context.redis.set(`wordsSoFar_${context.postId}`, JSON.stringify([...wordsSoFar, {by: username, word}]));
     context.redis.set(`currentTurn_${context.postId}`, nextTurn);
-    setWordsSoFar([...wordsSoFar, word]);
+    setWordsSoFar([...wordsSoFar, {by: username, word}]);
   });
 
   const onAddWordClick = async () => {
@@ -263,9 +280,10 @@ function GamePlay({ context, gamePlayData, username, players, moveTurn }: GamePl
     <text size="large">Next turn: {nextTurn}</text>
     <text size="large">Words so far:</text>
     <vstack>
-      {wordsSoFar.map(word => <text size="medium">{word}</text>)}
+      {wordsSoFar.map(word => <text size="medium">{word.by}: {word.word}</text>)}
     </vstack>
 
     {isCurrentTurn && <button onPress={onAddWordClick}>Add word</button>}
+    <button onPress={leaveGame}>End game</button>
   </>
 }
