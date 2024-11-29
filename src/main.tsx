@@ -1,6 +1,6 @@
 import './createPost.js';
 
-import { Devvit, useChannel, useState, Context, useAsync, useForm } from '@devvit/public-api';
+import { Devvit, useChannel, useState, Context, useAsync, useForm, useInterval } from '@devvit/public-api';
   
 type WordChainPostMessage = {
   type: 'joinGame';
@@ -32,6 +32,7 @@ type PostState = {
   letter: string;
   currentTurn: string;
   initWordsSoFar: WordSoFar[];
+  lostPlayers: string[];
 } | {
   type: PostStateType.Ended;
 }
@@ -41,6 +42,13 @@ Devvit.configure({
   realtime: true,
   redis: true,
 });
+
+Devvit.addSchedulerJob({
+  name: 'countdownTimer',
+  onRun: async (event, context) => {
+    context.realtime.send('word_chain_gameplay', { type: 'timesUp' });
+  }
+})
 
 // Add a custom post type to Devvit
 Devvit.addCustomPostType({
@@ -62,7 +70,9 @@ Devvit.addCustomPostType({
         if (parsed.type === PostStateType.Playing) {
           const redisWordsSoFar = await context.redis.get(`wordsSoFar_${context.postId}`);
           const redisCurrentTurn = await context.redis.get(`currentTurn_${context.postId}`);
+          const redisLostPlayers = await context.redis.get(`lostPlayers_${context.postId}`);
           parsed.initWordsSoFar = JSON.parse(redisWordsSoFar ?? "[]") as WordSoFar[];
+          parsed.lostPlayers = JSON.parse(redisLostPlayers ?? "[]") as string[];
           parsed.currentTurn = redisCurrentTurn ?? '';
           const redisLetter = await context.redis.get(`letter_${context.postId}`);
           parsed.letter = redisLetter ?? 'A';
@@ -79,6 +89,7 @@ Devvit.addCustomPostType({
 
     async function getPlayers() {
       const redisPlayers = await context.redis.get(`players_${context.postId}`);
+
       if (!redisPlayers) {
         return [];
       }
@@ -87,8 +98,9 @@ Devvit.addCustomPostType({
 
     const isLoading = usernameLoading || initialPostStateLoading || playersLoading;
 
-    return <vstack>
-      {isLoading && <text>Loading...</text>}
+
+    return <vstack grow={true}>
+      {isLoading && <text>Loading game...</text>}
       {!isLoading && <Game context={context} initialPlayers={players!} playersGetter={getPlayers} username={username!} initialPostState={initialPostState!} />}
     </vstack>
   }});
@@ -115,13 +127,15 @@ function Game({ context, initialPlayers, playersGetter, username, initialPostSta
           break;
         case 'joinGame':
           // todo: set max players maybe + basic validation
-          setPlayers([...players, msg.data.username]);
+          if (username !== msg.data.username) {
+            setPlayers([...players, msg.data.username]);
+          }
           break;
         case 'startGame':
-          if (players[0] === username && players.length > 1) {
+          if (players.length > 1) {
             const letter = msg.data.letter;
             const currentTurn = msg.data.currentTurn;
-            setPostState({ type: PostStateType.Playing, letter, currentTurn, initWordsSoFar: [] });
+            setPostState({ type: PostStateType.Playing, letter, currentTurn, initWordsSoFar: [], lostPlayers: [] });
           } else {
             // todo: show error
           }
@@ -141,7 +155,7 @@ function Game({ context, initialPlayers, playersGetter, username, initialPostSta
     // todo: validation maybe 
     const randomLetter = String.fromCharCode(Math.floor(Math.random() * 26) + 'A'.charCodeAt(0));
     const randomTurn = players[Math.floor(Math.random() * players.length)];
-    setPostState({ type: PostStateType.Playing, letter: randomLetter, currentTurn: randomTurn, initWordsSoFar: [] });
+    setPostState({ type: PostStateType.Playing, letter: randomLetter, currentTurn: randomTurn, initWordsSoFar: [], lostPlayers: [] });
     channel.send({ type: 'startGame', data: { letter: randomLetter, currentTurn: randomTurn } });
     await context.redis.set(`postState_${context.postId}`, JSON.stringify({ type: PostStateType.Playing, letter: randomLetter, currentTurn: randomTurn }));
     await context.redis.set(`currentTurn_${context.postId}`, randomTurn);
@@ -149,11 +163,9 @@ function Game({ context, initialPlayers, playersGetter, username, initialPostSta
   };
 
   const onJoinGameClick = async () => {
-    console.log("joining game now");
     setPlayers([...players, username]);
     await context.redis.set(`players_${context.postId}`, JSON.stringify([...players, username]));
     channel.send({ type: 'joinGame', data: { username } });
-    console.log("joined game now");
   };
 
   const onLeaveGameClick = async () => {
@@ -193,7 +205,7 @@ function Game({ context, initialPlayers, playersGetter, username, initialPostSta
       await context.redis.set(`wordsSoFar_${context.postId}`, JSON.stringify([]));
       setPostState({ ...postState, initWordsSoFar: [] });
     };
-    return <vstack>
+    return <vstack grow={true}>
       <GamePlay context={context} gamePlayData={postState} username={username} players={players} moveTurn={moveTurn} leaveGame={leaveGame} />
       <button onPress={clearWordsSoFar}>Clear words so far</button>
     </vstack>
@@ -212,6 +224,7 @@ type GamePlayParams = {
     letter: string;
     currentTurn: string;
     initWordsSoFar: WordSoFar[];
+    lostPlayers: string[];
   };
   players: string[];
   username: string;
@@ -221,34 +234,76 @@ type GamePlayParams = {
 
 type GamePlayMessage = {
   type: 'addWord';
-  data: { word: string };
+  data: { word: string; timestamp: number };
+} | {
+  type: 'timesUp';
 }
 
 type WordSoFar = {
   by: string;
   word: string;
+  timestamp: number;
 }
 
 function GamePlay({ context, gamePlayData, username, players, moveTurn, leaveGame }: GamePlayParams) {
-  const { letter:initialLetter, currentTurn, initWordsSoFar } = gamePlayData;
+  const { letter:initialLetter, currentTurn, initWordsSoFar, lostPlayers: initialLostPlayers } = gamePlayData;
   const nextTurn = players[(players.indexOf(currentTurn) + 1) % players.length];
   const [letter, setLetter] = useState(initialLetter);
 
   const [wordsSoFar, setWordsSoFar] = useState<WordSoFar[]>(initWordsSoFar);
 
+  function getRemainingTime(fromWords: WordSoFar[]) {
+    const maxTimeSeconds = 60;
+    const lastTimestamp = fromWords.length > 0 ? fromWords[fromWords.length - 1].timestamp : Date.now();
+    const timeRemaining = maxTimeSeconds * 1000 - (Date.now() - lastTimestamp);
+    return timeRemaining > 0 ? timeRemaining : 0;
+  }
+
+  const [timerValue, setTimerValue] = useState(getRemainingTime(initWordsSoFar));
+
+  const timerInterval = useInterval(() => {
+    setTimerValue(getRemainingTime(wordsSoFar));
+  }, 1000);
+
+  timerInterval.start();
+
   const isCurrentTurn = currentTurn === username;
+  const timerValueSeconds = Math.floor(timerValue / 1000);
+
+  const [removePlayerAlert, setRemovePlayerAlert] = useState<string | null>(null);
+
+  const [lostPlayers, setLostPlayers] = useState<string[]>(initialLostPlayers);
 
   const channel = useChannel<GamePlayMessage>({
     name: 'word_chain_gameplay',
     onMessage: (msg) => {
       if (msg.type === 'addWord') {
         if (currentTurn !== username) {
-          setWordsSoFar([...wordsSoFar, {by: currentTurn, word: msg.data.word}]);
+          const timestamp = msg.data.timestamp;
+          // validation - timestamp should be within some seconds of the current time.
+          if (timestamp < Date.now() - 5000) {
+            // should throw an error or something maybe? or ban the user?
+            return;
+          }
+          setWordsSoFar([...wordsSoFar, {by: currentTurn, word: msg.data.word, timestamp}]);
           setLetter(nextLetter(msg.data.word));
+          setTimerValue(getRemainingTime(wordsSoFar));
+        }
+        moveTurn();
+      } else if (msg.type === 'timesUp') {
+        // this means that a user didn't add a word in time
+        // so the player loses, and the current turn is over
+        // at least one player should update redis on their turn maybe.
+
+        setLostPlayers([...lostPlayers, currentTurn]);
+        if (players[0] === username) {
+          context.redis.set(`lostPlayers_${context.postId}`, JSON.stringify([...lostPlayers, currentTurn]));
+
+          nextWordTasks('<system> times up');
         }
         moveTurn();
       } else {
-        throw new Error(`Unknown message type: ${msg}`);
+        throw new Error(`Unknown message type: ${msg satisfies never}`);
       }
     },
   });
@@ -267,19 +322,36 @@ function GamePlay({ context, gamePlayData, username, players, moveTurn, leaveGam
         label: `Your word starting with ${letter}`,
       }
     ],
-  }, values => {
+  }, async values => {
     const word = values.word;
     if (!word) {
       // todo: show error
       return;
     }
-    setWordsSoFar([...wordsSoFar, {by: username, word}]);
-    setLetter(nextLetter(word));
-    channel.send({ type: 'addWord', data: { word } });
+    nextWordTasks(word);
+  });
+
+  async function nextWordTasks(word: string) {
+    if (!word.startsWith('<system>')) {
+      setWordsSoFar([...wordsSoFar, {by: username, word, timestamp: Date.now()}]);
+      setLetter(nextLetter(word));
+      context.redis.set(`letter_${context.postId}`, nextLetter(word));
+    }
+    channel.send({ type: 'addWord', data: { word, timestamp: Date.now() } });
+    const currentJobId = await context.redis.get(`countdownTimerJobId_${context.postId}`);
+    if (currentJobId) {
+      context.scheduler.cancelJob(currentJobId).catch(() => {});
+    }
+
+    const newJobId = await context.scheduler.runJob({
+      name: 'countdownTimer',
+      runAt: new Date(Date.now() + 60000),
+    });
+    context.redis.set(`countdownTimerJobId_${context.postId}`, newJobId);
+    
     context.redis.set(`wordsSoFar_${context.postId}`, JSON.stringify([...wordsSoFar, {by: username, word}]));
     context.redis.set(`currentTurn_${context.postId}`, nextTurn);
-    context.redis.set(`letter_${context.postId}`, nextLetter(word));
-  });
+  }
 
   const onAddWordClick = async () => {
     context.ui.showForm(wordForm);
@@ -289,15 +361,15 @@ function GamePlay({ context, gamePlayData, username, players, moveTurn, leaveGam
 
   const limitedWordsSoFar = wordsSoFar.slice(0, maxWords);
 
-  return <vstack padding="small">
-    {/* <hstack grow={true}>
-      <spacer />
-      <text size="large">{letter}</text>
-      <text size="large">Next: {nextTurn}</text>
-    </hstack> */}
-
-    <hstack grow={true} width='100%'>
-      <spacer width='33%'/>
+  return <vstack padding="small" grow={true}>
+    <hstack width='100%'>
+      <vstack width='33%'>
+        <hstack border='thick' padding='small' cornerRadius='full'>
+          <text size="xxlarge">
+              {timerValueSeconds}
+          </text>
+        </hstack>
+      </vstack>
       <vstack width='33%' alignment='middle center' backgroundColor={isCurrentTurn ? 'red' : 'blue'} cornerRadius='small'>
         <text size="xxlarge" weight='bold' color='white' >
           {letter}
@@ -308,20 +380,20 @@ function GamePlay({ context, gamePlayData, username, players, moveTurn, leaveGam
         <text size="large">{nextTurn}</text>
       </vstack>
     </hstack>
-    <vstack>
-      {limitedWordsSoFar.map(word => <vstack alignment={word.by !== username ? 'start' : 'end'}>
-        <vstack>
-          <text size="small">{word.by === username ? 'You' : word.by}</text>
-        </vstack>
-        <vstack
-          backgroundColor={word.by === username ? 'red' : 'blue'}
-          padding="small"
-          cornerRadius='medium'
-          >
-          <text color='white'>{word.word}</text>
-        </vstack>
-      </vstack>)}
-    </vstack>
+    {limitedWordsSoFar.map(word => <vstack alignment={word.by !== username ? 'start' : 'end'}>
+      <vstack>
+        <text size="small">{word.by === username ? 'You' : word.by}</text>
+      </vstack>
+      <vstack
+        backgroundColor={word.by === username ? 'red' : 'blue'}
+        padding="small"
+        cornerRadius='medium'
+        >
+        <text color='white'>{word.word}</text>
+      </vstack>
+    </vstack>)}
+    <spacer grow={true} />
+    {lostPlayers.length > 0 && <text>Lost players: {lostPlayers.join(', ')}</text>}
     {isCurrentTurn && <button onPress={onAddWordClick}>Add word</button>}
     <button onPress={leaveGame}>End game</button>
   </vstack>
