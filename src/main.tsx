@@ -63,7 +63,9 @@ Devvit.addCustomPostType({
           const redisWordsSoFar = await context.redis.get(`wordsSoFar_${context.postId}`);
           const redisCurrentTurn = await context.redis.get(`currentTurn_${context.postId}`);
           parsed.initWordsSoFar = JSON.parse(redisWordsSoFar ?? "[]") as WordSoFar[];
-          parsed.currentTurn = redisCurrentTurn ?? 'a_cube_root_of_one';
+          parsed.currentTurn = redisCurrentTurn ?? '';
+          const redisLetter = await context.redis.get(`letter_${context.postId}`);
+          parsed.letter = redisLetter ?? 'A';
         }
         return parsed;
       } catch (e) {
@@ -228,8 +230,9 @@ type WordSoFar = {
 }
 
 function GamePlay({ context, gamePlayData, username, players, moveTurn, leaveGame }: GamePlayParams) {
-  const { letter, currentTurn, initWordsSoFar } = gamePlayData;
+  const { letter:initialLetter, currentTurn, initWordsSoFar } = gamePlayData;
   const nextTurn = players[(players.indexOf(currentTurn) + 1) % players.length];
+  const [letter, setLetter] = useState(initialLetter);
 
   const [wordsSoFar, setWordsSoFar] = useState<WordSoFar[]>(initWordsSoFar);
 
@@ -241,6 +244,7 @@ function GamePlay({ context, gamePlayData, username, players, moveTurn, leaveGam
       if (msg.type === 'addWord') {
         if (currentTurn !== username) {
           setWordsSoFar([...wordsSoFar, {by: currentTurn, word: msg.data.word}]);
+          setLetter(nextLetter(msg.data.word));
         }
         moveTurn();
       } else {
@@ -248,8 +252,12 @@ function GamePlay({ context, gamePlayData, username, players, moveTurn, leaveGam
       }
     },
   });
-  
+
   channel.subscribe();
+
+  function nextLetter(word: string) {
+    return word[word.length - 1].toUpperCase();
+  }
 
   const wordForm = useForm({
     fields: [
@@ -265,25 +273,56 @@ function GamePlay({ context, gamePlayData, username, players, moveTurn, leaveGam
       // todo: show error
       return;
     }
+    setWordsSoFar([...wordsSoFar, {by: username, word}]);
+    setLetter(nextLetter(word));
     channel.send({ type: 'addWord', data: { word } });
     context.redis.set(`wordsSoFar_${context.postId}`, JSON.stringify([...wordsSoFar, {by: username, word}]));
     context.redis.set(`currentTurn_${context.postId}`, nextTurn);
-    setWordsSoFar([...wordsSoFar, {by: username, word}]);
+    context.redis.set(`letter_${context.postId}`, nextLetter(word));
   });
 
   const onAddWordClick = async () => {
     context.ui.showForm(wordForm);
   };
 
-  return <>
-    <text size="large">Current letter: {letter}</text>
-    <text size="large">Next turn: {nextTurn}</text>
-    <text size="large">Words so far:</text>
-    <vstack>
-      {wordsSoFar.map(word => <text size="medium">{word.by}: {word.word}</text>)}
-    </vstack>
+  const maxWords = 7;
 
+  const limitedWordsSoFar = wordsSoFar.slice(0, maxWords);
+
+  return <vstack padding="small">
+    {/* <hstack grow={true}>
+      <spacer />
+      <text size="large">{letter}</text>
+      <text size="large">Next: {nextTurn}</text>
+    </hstack> */}
+
+    <hstack grow={true} width='100%'>
+      <spacer width='33%'/>
+      <vstack width='33%' alignment='middle center' backgroundColor={isCurrentTurn ? 'red' : 'blue'} cornerRadius='small'>
+        <text size="xxlarge" weight='bold' color='white' >
+          {letter}
+        </text>
+      </vstack>
+      <vstack width='33%' alignment='end'>
+        <text size='medium'>Next</text>
+        <text size="large">{nextTurn}</text>
+      </vstack>
+    </hstack>
+    <vstack>
+      {limitedWordsSoFar.map(word => <vstack alignment={word.by !== username ? 'start' : 'end'}>
+        <vstack>
+          <text size="small">{word.by === username ? 'You' : word.by}</text>
+        </vstack>
+        <vstack
+          backgroundColor={word.by === username ? 'red' : 'blue'}
+          padding="small"
+          cornerRadius='medium'
+          >
+          <text color='white'>{word.word}</text>
+        </vstack>
+      </vstack>)}
+    </vstack>
     {isCurrentTurn && <button onPress={onAddWordClick}>Add word</button>}
     <button onPress={leaveGame}>End game</button>
-  </>
+  </vstack>
 }
