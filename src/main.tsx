@@ -396,7 +396,7 @@ function GamePlay({ context, gamePlayData, username, players, moveTurn, leaveGam
       </vstack>
       <vstack width='33%' alignment='end'>
         <text size='medium'>Next</text>
-        <text size="large">{nextTurn}</text>
+        <text size="large" weight='bold'>{nextTurn}</text>
       </vstack>
     </hstack>
     {limitedWordsSoFar.map(word => <vstack alignment={word.by !== username ? 'start' : 'end'}>
@@ -410,6 +410,7 @@ function GamePlay({ context, gamePlayData, username, players, moveTurn, leaveGam
         >
         <text color='white'>{word.word}</text>
       </vstack>
+      <text>Waiting for {word.by} to add a word...</text>
     </vstack>)}
     <spacer grow={true} />
     {lostPlayers.length > 0 && <text>Lost players: {lostPlayers.join(', ')}</text>}
