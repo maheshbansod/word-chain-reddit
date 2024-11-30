@@ -1,6 +1,7 @@
 import './createPost.js';
 
 import { Devvit, useChannel, useState, Context, useAsync, useForm, useInterval } from '@devvit/public-api';
+import { PostState, PostStateType, WordSoFar } from './types.js';
   
 type WordChainPostMessage = {
   type: 'joinGame';
@@ -23,25 +24,6 @@ type WordChainPostMessage = {
     username: string;
     snoovatarUrl: string;
   }
-
-enum PostStateType {
-  Lobby,
-  Playing,
-  Ended,
-}
-
-type PostState = {
-  type: PostStateType.Lobby;
-} | {
-  type: PostStateType.Playing;
-  letter: string;
-  currentTurn: string;
-  initWordsSoFar: WordSoFar[];
-  lostPlayers: string[];
-} | {
-  type: PostStateType.Ended;
-  leaderboard: string[];
-}
 
 Devvit.configure({
   redditAPI: true,
@@ -246,25 +228,55 @@ function Game({ context, initialPlayers, playersGetter, userData, initialPostSta
         const playerWhoLostLast = player;
         const winner = activePlayers.filter(player => player !== playerWhoLostLast)[0];
         const leaderboard = [winner, playerWhoLostLast, ...lostPlayers];
-        setPostState({ type: PostStateType.Ended, leaderboard });
-        if (players[0] === username) {
-          context.redis.set(`postState_${context.postId}`, JSON.stringify({ type: PostStateType.Ended, leaderboard })).catch(() => {});
-        }
+        context.redis.get(`wordsSoFar_${context.postId}`).then(wordsSoFarRaw => {
+          const wordsSoFar = JSON.parse(wordsSoFarRaw ?? "[]") as WordSoFar[];
+          setPostState({ type: PostStateType.Ended, leaderboard, words: wordsSoFar });
+          if (players[0] === username) {
+            context.redis.set(`postState_${context.postId}`, JSON.stringify({ type: PostStateType.Ended, leaderboard, words: wordsSoFar })).catch(() => {});
+          }
+        });
         return true;
       }
       return false;
     };
     return <vstack grow={true}>
       <GamePlay context={context} gamePlayData={postState} username={username} players={activePlayers} moveTurn={moveTurn} addLostPlayer={addLostPlayer} leaveGame={leaveGame} />
-      <button onPress={clearWordsSoFar}>Clear words so far</button>
+      {/* <button onPress={clearWordsSoFar}>Clear words so far</button> */}
     </vstack>
   }
 
+  const placeEmoji = postState.leaderboard.indexOf(username) === 0 ? '🏆' : postState.leaderboard.indexOf(username) === 1 ? '🥈' : postState.leaderboard.indexOf(username) === 2 ? '🥉' : '';
+  // st, nd, rd, th
+  const placePrefix = postState.leaderboard.indexOf(username) === 0 ? 'st' : postState.leaderboard.indexOf(username) === 1 ? 'nd' : postState.leaderboard.indexOf(username) === 2 ? 'rd' : 'th';
+  
+  const longestWord = postState.words.reduce((longest, word) => word.word.length > longest.word.length ? word : longest, postState.words[0]);
+
+
   // Game ended state
-  return <vstack grow={true}>
-    <text size="xxlarge">Leaderboard</text>
-    {postState.leaderboard.map(player => <text size="large">{player}</text>)}
-  </vstack>
+  return <vstack grow={true} padding="small">
+  <text size="xxlarge" alignment="center">Leaderboard</text>
+  <spacer />
+  <hstack>
+    <vstack gap="small" width="50%">
+      {postState.leaderboard.map((player, i) => <hstack border={player === username ? 'thick' : 'thin'} padding="small" cornerRadius="small" gap="small" borderColor={player === username ? 'skyblue': undefined}>
+        <text size="large" weight="bold">#{i + 1}</text>
+        <text size="large">{player}</text>
+        <spacer grow />
+        {i == 0 && <icon name="contest-fill" color="gold" />}
+        {i == 1 && <icon name="contest-fill" color="silver" />}
+        {i == 2 && <icon name="contest-fill" color="brown" />}
+      </hstack>)}
+    </vstack>
+    <vstack width="50%" padding='small'>
+      <text size="large">You finished in {placeEmoji} {postState.leaderboard.indexOf(username) + 1}{placePrefix} place</text>
+      <spacer />
+      <text>There were a total of {postState.words.length} words!</text>
+      <text>Longest word was {longestWord.word.length} letters long by {longestWord.by}: {longestWord.word}</text>
+    </vstack>
+  </hstack>
+  <spacer grow />
+  {/* {username === players[0] && <button appearance="secondary">Back to lobby</button>} */}
+</vstack>
 
 }
 
@@ -291,12 +303,6 @@ type GamePlayMessage = {
   data: { word: string; timestamp: number };
 } | {
   type: 'timesUp';
-}
-
-type WordSoFar = {
-  by: string;
-  word: string;
-  timestamp: number;
 }
 
 function GamePlay({ context, gamePlayData, username, players, moveTurn, addLostPlayer, leaveGame }: GamePlayParams) {
@@ -411,7 +417,7 @@ function GamePlay({ context, gamePlayData, username, players, moveTurn, addLostP
 
   const maxWords = 7;
 
-  const limitedWordsSoFar = wordsSoFar.slice(0, maxWords);
+  const limitedWordsSoFar = wordsSoFar.length > maxWords ? wordsSoFar.slice(wordsSoFar.length - maxWords) : wordsSoFar;
 
   return <vstack padding="small" grow={true}>
     <hstack width='100%'>
@@ -452,6 +458,6 @@ function GamePlay({ context, gamePlayData, username, players, moveTurn, addLostP
     <text alignment='center'>Waiting for {currentTurn} to add a word...</text>
     <spacer grow={true} />
     {isCurrentTurn && <button onPress={onAddWordClick}>Add word</button>}
-    <button onPress={leaveGame}>End game</button>
+    {/* <button onPress={leaveGame}>End game</button> */}
   </vstack>
 }
