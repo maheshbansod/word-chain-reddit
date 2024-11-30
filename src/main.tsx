@@ -40,6 +40,7 @@ type PostState = {
   lostPlayers: string[];
 } | {
   type: PostStateType.Ended;
+  leaderboard: string[];
 }
 
 Devvit.configure({
@@ -166,6 +167,7 @@ function Game({ context, initialPlayers, playersGetter, userData, initialPostSta
     await context.redis.set(`postState_${context.postId}`, JSON.stringify({ type: PostStateType.Playing, letter: randomLetter, currentTurn: randomTurn }));
     await context.redis.set(`currentTurn_${context.postId}`, randomTurn);
     await context.redis.set(`wordsSoFar_${context.postId}`, JSON.stringify([]));
+    await context.redis.set(`lostPlayers_${context.postId}`, JSON.stringify([]));
   };
 
   const onJoinGameClick = async () => {
@@ -212,8 +214,13 @@ function Game({ context, initialPlayers, playersGetter, userData, initialPostSta
   };
 
   if (postState.type === PostStateType.Playing) {
+
+    function getActivePlayers() {
+      return 'lostPlayers' in postState ? players.filter(player => !postState.lostPlayers.includes(player)) : [];
+    }
+    const activePlayers = getActivePlayers();
     const moveTurn = () => {
-      const nextTurn = players[(players.indexOf(postState.currentTurn) + 1) % players.length];  
+      const nextTurn = activePlayers[(activePlayers.indexOf(postState.currentTurn) + 1) % activePlayers.length];  
       setPostState({ ...postState, currentTurn: nextTurn });
     };
     const leaveGame = async () => {
@@ -224,13 +231,40 @@ function Game({ context, initialPlayers, playersGetter, userData, initialPostSta
       await context.redis.set(`wordsSoFar_${context.postId}`, JSON.stringify([]));
       setPostState({ ...postState, initWordsSoFar: [] });
     };
+    const addLostPlayer = (player: string) => {
+      setPostState({ ...postState, lostPlayers: [...postState.lostPlayers, player] });
+      if (players[0] === username) {
+        context.redis.set(`lostPlayers_${context.postId}`, JSON.stringify([...postState.lostPlayers, player]));
+      }
+      if (activePlayers.length === 2) { // we check 2 since the state will update on the re-render
+        // the game has ended
+        // let's make a leaderboard
+        // basically lost players are added in the sequence that they lost, so we can just reverse that.
+        const lostPlayers = [...postState.lostPlayers];
+        lostPlayers.reverse();
+        // `player` is the one who lost last
+        const playerWhoLostLast = player;
+        const winner = activePlayers.filter(player => player !== playerWhoLostLast)[0];
+        const leaderboard = [winner, playerWhoLostLast, ...lostPlayers];
+        setPostState({ type: PostStateType.Ended, leaderboard });
+        if (players[0] === username) {
+          context.redis.set(`postState_${context.postId}`, JSON.stringify({ type: PostStateType.Ended, leaderboard })).catch(() => {});
+        }
+        return true;
+      }
+      return false;
+    };
     return <vstack grow={true}>
-      <GamePlay context={context} gamePlayData={postState} username={username} players={players} moveTurn={moveTurn} leaveGame={leaveGame} />
+      <GamePlay context={context} gamePlayData={postState} username={username} players={activePlayers} moveTurn={moveTurn} addLostPlayer={addLostPlayer} leaveGame={leaveGame} />
       <button onPress={clearWordsSoFar}>Clear words so far</button>
     </vstack>
   }
 
-  return <text>hello {postState.type}</text>
+  // Game ended state
+  return <vstack grow={true}>
+    <text size="xxlarge">Leaderboard</text>
+    {postState.leaderboard.map(player => <text size="large">{player}</text>)}
+  </vstack>
 
 }
 
@@ -248,6 +282,7 @@ type GamePlayParams = {
   players: string[];
   username: string;
   moveTurn: () => void;
+  addLostPlayer: (player: string) => boolean;
   leaveGame: () => void;
 }
 
@@ -264,8 +299,8 @@ type WordSoFar = {
   timestamp: number;
 }
 
-function GamePlay({ context, gamePlayData, username, players, moveTurn, leaveGame }: GamePlayParams) {
-  const { letter:initialLetter, currentTurn, initWordsSoFar, lostPlayers: initialLostPlayers } = gamePlayData;
+function GamePlay({ context, gamePlayData, username, players, moveTurn, addLostPlayer, leaveGame }: GamePlayParams) {
+  const { letter:initialLetter, currentTurn, initWordsSoFar } = gamePlayData;
   const nextTurn = players[(players.indexOf(currentTurn) + 1) % players.length];
   const [letter, setLetter] = useState(initialLetter);
 
@@ -289,10 +324,6 @@ function GamePlay({ context, gamePlayData, username, players, moveTurn, leaveGam
   const isCurrentTurn = currentTurn === username;
   const timerValueSeconds = Math.floor(timerValue / 1000);
 
-  const [removePlayerAlert, setRemovePlayerAlert] = useState<string | null>(null);
-
-  const [lostPlayers, setLostPlayers] = useState<string[]>(initialLostPlayers);
-
   const channel = useChannel<GamePlayMessage>({
     name: 'word_chain_gameplay',
     onMessage: (msg) => {
@@ -314,9 +345,11 @@ function GamePlay({ context, gamePlayData, username, players, moveTurn, leaveGam
         // so the player loses, and the current turn is over
         // at least one player should update redis on their turn maybe.
 
-        setLostPlayers([...lostPlayers, currentTurn]);
+        const isGameOver = addLostPlayer(currentTurn);
+        if (isGameOver) {
+          return;
+        }
         if (players[0] === username) {
-          context.redis.set(`lostPlayers_${context.postId}`, JSON.stringify([...lostPlayers, currentTurn]));
 
           nextWordTasks('<system> times up');
         }
@@ -368,7 +401,7 @@ function GamePlay({ context, gamePlayData, username, players, moveTurn, leaveGam
     });
     context.redis.set(`countdownTimerJobId_${context.postId}`, newJobId);
     
-    context.redis.set(`wordsSoFar_${context.postId}`, JSON.stringify([...wordsSoFar, {by: username, word}]));
+    context.redis.set(`wordsSoFar_${context.postId}`, JSON.stringify([...wordsSoFar, {by: username, word, timestamp: Date.now()}]));
     context.redis.set(`currentTurn_${context.postId}`, nextTurn);
   }
 
@@ -382,11 +415,16 @@ function GamePlay({ context, gamePlayData, username, players, moveTurn, leaveGam
 
   return <vstack padding="small" grow={true}>
     <hstack width='100%'>
-      <vstack width='33%'>
+      <vstack width='33%' alignment='middle start'>
         <hstack border='thick' padding='small' cornerRadius='full'>
-          <text size="xxlarge">
-              {timerValueSeconds}
-          </text>
+          {wordsSoFar.length === 0 && <>
+            <spacer/>
+            <text size="xxlarge">READY</text>
+            <spacer/>
+          </>}
+          {wordsSoFar.length > 0 && <text size="xxlarge" width="30px" alignment="center">
+            {timerValueSeconds}
+          </text>}
         </hstack>
       </vstack>
       <vstack width='33%' alignment='middle center' backgroundColor={isCurrentTurn ? 'red' : 'blue'} cornerRadius='small'>
@@ -410,10 +448,9 @@ function GamePlay({ context, gamePlayData, username, players, moveTurn, leaveGam
         >
         <text color='white'>{word.word}</text>
       </vstack>
-      <text>Waiting for {word.by} to add a word...</text>
     </vstack>)}
+    <text alignment='center'>Waiting for {currentTurn} to add a word...</text>
     <spacer grow={true} />
-    {lostPlayers.length > 0 && <text>Lost players: {lostPlayers.join(', ')}</text>}
     {isCurrentTurn && <button onPress={onAddWordClick}>Add word</button>}
     <button onPress={leaveGame}>End game</button>
   </vstack>
