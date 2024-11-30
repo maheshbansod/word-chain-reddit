@@ -19,6 +19,11 @@ type WordChainPostMessage = {
     data: { word: string };
   };
 
+  type UserData = {
+    username: string;
+    snoovatarUrl: string;
+  }
+
 enum PostStateType {
   Lobby,
   Playing,
@@ -55,9 +60,10 @@ Devvit.addCustomPostType({
   name: 'Webview Example',
   height: 'tall',
   render: (context) => {
-    const { data: username, loading: usernameLoading } = useAsync(async () => {
+    const { data: userData, loading: usernameLoading } = useAsync(async () => {
       const currUser = await context.reddit.getCurrentUser();
-      return currUser?.username ?? 'anon';
+      const snoovatarUrl = await currUser?.getSnoovatarUrl();
+      return { username: currUser?.username ?? 'anon', snoovatarUrl: snoovatarUrl ?? '' };
     });
 
     const { data: initialPostState, loading: initialPostStateLoading } = useAsync(async () => {
@@ -101,7 +107,7 @@ Devvit.addCustomPostType({
 
     return <vstack grow={true}>
       {isLoading && <text>Loading game...</text>}
-      {!isLoading && <Game context={context} initialPlayers={players!} playersGetter={getPlayers} username={username!} initialPostState={initialPostState!} />}
+      {!isLoading && <Game context={context} initialPlayers={players!} playersGetter={getPlayers} userData={userData!} initialPostState={initialPostState!} />}
     </vstack>
   }});
 
@@ -109,12 +115,12 @@ type GameParams = {
   context: Context;
   initialPlayers: string[];
   playersGetter: () => Promise<string[]>;
-  username: string;
+  userData: UserData;
   initialPostState: PostState;
 }
 
-function Game({ context, initialPlayers, playersGetter, username, initialPostState }: GameParams) {
-
+function Game({ context, initialPlayers, playersGetter, userData, initialPostState }: GameParams) {
+  const { username, snoovatarUrl } = userData;
   const [players, setPlayers] = useState<string[]>(initialPlayers);
   const [postState, setPostState] = useState<PostState>(initialPostState);
 
@@ -176,20 +182,33 @@ function Game({ context, initialPlayers, playersGetter, username, initialPostSta
 
   if (postState.type === PostStateType.Lobby) {
     const isJoined = players.includes(username);
-    return <>
-      <text size="large">Waiting for players to join...</text>
-      <hstack>
-        <text size="medium">Players:</text>
-        <vstack>
-          {players.map(player => 
-            <text size="medium" weight="bold">{player}</text>
-        )}
-        </vstack>
+    return  (<vstack grow padding="small">
+      <hstack alignment="middle" height="30px">
+        <text size="xxlarge" alignment="center">Word chain!</text>
+        <spacer grow />
+        {isJoined && <button appearance="destructive" onPress={onLeaveGameClick}>Leave game</button>}
       </hstack>
-      {players.length > 1 && players[0] === username && <button onPress={onStartGameClick}>Start game</button>}
-      {!isJoined && <button onPress={onJoinGameClick}>Join game</button>}
-      {isJoined && <button onPress={onLeaveGameClick}>Leave game</button>}
-    </>
+      {players.length === 0 && <vstack grow alignment="center middle"><text size="large">Waiting for players to join...</text></vstack>}
+      {players.length > 0 && <vstack grow gap="small">
+          <spacer />
+          {players.map(player => <hstack border="thick" borderColor="green" padding="small" cornerRadius="small" alignment='middle'>
+            <icon name="admin-fill" color="red" />
+            <spacer />
+            <text size="medium" weight="bold">u/{player}</text>
+            {players[0] !== username && player === username && <>
+              <spacer />
+              <icon name="joined-fill" color="green" />
+            </>}
+            {players[0] === player && <>
+              <spacer/>
+              <icon name="mod" color="blue"/>
+            </>}
+          </hstack>
+        )}
+      </vstack>}
+      {players.length > 1 && players[0] === username && <button appearance="primary" onPress={onStartGameClick}>Start game</button>}
+      {!isJoined && <button appearance="primary" onPress={onJoinGameClick}>Join game</button>}
+    </vstack>)
   };
 
   if (postState.type === PostStateType.Playing) {
